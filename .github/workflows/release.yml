@@ -236,8 +236,85 @@ jobs:
             electron/dist/*.zip
           if-no-files-found: error
 
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install system deps for Playwright
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libnss3 libnspr4 libatk-bridge2.0-0 libdrm2 libxkbcommon0 \
+            libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
+            libgbm1 libasound2 libpango-1.0-0 libcups2
+
+      - name: Install Python deps
+        run: pip install -r requirements.txt
+
+      - name: Install Playwright browsers
+        run: playwright install chromium
+
+      - name: Build frontend
+        run: cd frontend && npm ci --legacy-peer-deps && npm run build
+
+      - name: Inject version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "APP_VERSION=$VERSION" >> $GITHUB_ENV
+          echo "__version__ = \"$VERSION\"" > core/version.py
+          cd electron && npm version --no-git-tag-version --allow-same-version "$VERSION"
+
+      - name: Build Python backend
+        run: |
+          pip install pyinstaller
+          pyinstaller --onedir --name backend \
+            --add-data "platforms:platforms" \
+            --add-data "core:core" \
+            --add-data "api:api" \
+            --add-data "services:services" \
+            --add-data "static:static" \
+            --collect-all browserforge \
+            --collect-all camoufox \
+            --collect-all apify_fingerprint_datapoints \
+            --collect-all language_tags \
+            --collect-all ua_parser \
+            --collect-all ua_parser_builtins \
+            --collect-all quart \
+            --collect-all hypercorn \
+            --collect-all aiofiles \
+            --collect-all werkzeug \
+            main.py
+          mkdir -p electron/backend
+          cp -r dist/backend electron/backend/
+
+      - name: Build Electron (Linux)
+        run: |
+          cd electron
+          npm ci --legacy-peer-deps
+          npx electron-builder --linux --publish never
+        env:
+          ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-builds
+          path: electron/dist/*.AppImage
+          if-no-files-found: error
+
   release:
-    needs: [build-mac, build-mac-intel, build-win]
+    needs: [build-mac, build-mac-intel, build-win, build-linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -258,6 +335,12 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: win-builds
+          path: dist/
+
+      - name: Download Linux builds
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-builds
           path: dist/
 
       - name: Create GitHub Release
