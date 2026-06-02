@@ -135,6 +135,30 @@ def test_fetch_us_billing_address_can_keep_remote_card_when_disabled(monkeypatch
     assert address["card_cvv"] == "327"
 
 
+def test_fetch_billing_address_falls_back_to_local_jp_seed_on_remote_tls_error(monkeypatch):
+    calls = {"post": 0}
+
+    def fake_post(url, **kwargs):
+        calls["post"] += 1
+        raise RuntimeError(
+            "Failed to perform, curl: (35) TLS connect error: "
+            "OPENSSL_internal:invalid library"
+        )
+
+    monkeypatch.setattr(payment_module.cffi_requests, "post", fake_post)
+    monkeypatch.setattr(payment_module.time, "sleep", lambda seconds: None)
+
+    address = payment_module.fetch_billing_address("JP", use_local_card=False)
+
+    assert calls["post"] == 3
+    assert address["country"] == "JP"
+    assert address["name"] == "James Smith"
+    assert address["line1"] == "Marunouchi 1-1"
+    assert address["city"] == "Chiyoda-ku"
+    assert address["state"] == "Tokyo"
+    assert address["postal_code"] == "100-0005"
+
+
 def test_fetch_ctf_relay_code_extracts_six_digit_code(monkeypatch):
     def fake_get(url, **kwargs):
         assert url == payment_module.CTF_RELAY_CODE_URL
@@ -480,6 +504,7 @@ def test_generate_ctf_test_identity_uses_natural_random_values():
     assert re.search(r"[A-Za-z]", identity["address_line1"])
     assert identity["city"]
     assert identity["postal_code"]
+    assert identity["date_of_birth"] == payment_module.CTF_DATE_OF_BIRTH
 
 
 def test_hold_checkout_browser_exits_early_when_cancel_requested(monkeypatch):
@@ -3997,6 +4022,74 @@ def test_complete_paypal_checkout_uses_camoufox_and_submits(monkeypatch):
     assert any(event[0] == "click" and "submit" in event[1].lower() for event in page.events)
 
 
+def test_complete_paypal_checkout_retries_initial_checkout_navigation(monkeypatch):
+    state = {"logs": []}
+
+    class FakePage:
+        def __init__(self):
+            self.context = SimpleNamespace(add_cookies=lambda cookies: None)
+            self.url = "about:blank"
+            self.goto_calls = 0
+
+        def goto(self, url, **kwargs):
+            self.goto_calls += 1
+            if self.goto_calls < 3:
+                raise RuntimeError(
+                    f"Page.goto: net::ERR_CONNECTION_CLOSED at {url}"
+                )
+            self.url = url
+
+        def wait_for_timeout(self, timeout):
+            pass
+
+    class FakeContext:
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    page = FakePage()
+
+    monkeypatch.setattr(
+        payment_module,
+        "_open_unique_camoufox_page",
+        lambda *args, **kwargs: (FakeContext(), object(), page),
+    )
+    monkeypatch.setattr(
+        payment_module,
+        "fetch_us_billing_address",
+        lambda *, email="": {
+            "name": "Gul Bai",
+            "line1": "2798 Clover Drive",
+            "city": "Colorado Springs",
+            "state": "CO",
+            "postal_code": "80911",
+            "phone": "719-464-8566",
+            "country": "US",
+            "email": email,
+        },
+    )
+    monkeypatch.setattr(payment_module, "_probe_camoufox_proxy_exit", lambda page, *, log: {"ok": True})
+    monkeypatch.setattr(payment_module, "_wait_checkout_page_ready", lambda page, *, timeout_ms, log: None)
+    monkeypatch.setattr(payment_module, "_verify_checkout_is_free_trial", lambda page, *, log: None)
+    monkeypatch.setattr(
+        payment_module,
+        "detect_paypal_stage",
+        lambda page: {"stage": payment_module._STAGE_CHATGPT_SUCCESS},
+    )
+    monkeypatch.setattr(payment_module.time, "sleep", lambda seconds: None)
+
+    result = payment_module.complete_paypal_checkout(
+        checkout_url="https://pay.openai.com/c/pay/cs_test_plus",
+        headless=True,
+        hold_seconds=0,
+        log_fn=state["logs"].append,
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "completed"
+    assert page.goto_calls == 3
+    assert any("打开 ChatGPT 测试支付链接瞬时网络失败" in message for message in state["logs"])
+
+
 def test_complete_paypal_checkout_reopens_camoufox_for_duplicate_fingerprint(monkeypatch):
     state = {"launches": [], "closed": [], "fingerprints": ["same-browser", "same-browser", "fresh-browser"]}
 
@@ -6765,16 +6858,23 @@ def test_paypal_captcha_dom_stripper_js_contains_three_gujumpgate_selectors():
     assert ".captcha-container" in js
 
 
-def test_paypal_captcha_dom_stripper_js_installs_mutation_observer_5min():
-    """JS 必须装 MutationObserver 且 setTimeout 300000ms (5min) 内自动 disconnect。
-    5min 覆盖整个 checkout 流程（含手填 OTP、等 PayPal review、最后跳回 chatgpt），
-    比早期 30s 更鲁棒——PayPal 偶尔会在 form 提交后 1-2min 才注入 captcha 浮层。"""
+def test_paypal_captcha_dom_stripper_js_installs_mutation_observer_20min():
+    """JS 必须装 MutationObserver + 1s setInterval 双保险，setTimeout 1200000ms
+    (20min) 内自动 disconnect/clearInterval。
+
+    20min 覆盖更长的 JP 流程（统一 guest 表单 + SMS OTP 120s 初始 + 多轮
+    Resend + 换号，经常超过早期 5min），比 5min 更鲁棒——PayPal NGRL 异常
+    检测会在 SMS 等待空窗里异步注入 reCAPTCHA authchallenge 浮层。
+    setInterval 主动周期扫补 MutationObserver 漏检（display 切换不触发
+    childList 回调的情况）。"""
     js = payment_module._PAYPAL_CAPTCHA_DOM_STRIPPER_JS
     assert "MutationObserver" in js
     assert "observer.disconnect()" in js
-    # observer 寿命 5min（300000ms），不是早期的 30s
-    assert "300000" in js
-    assert "30000" not in js or js.count("30000") == js.count("300000")  # 仅作为 300000 的子串出现
+    # 周期主动扫（1s ticker）+ 清理
+    assert "setInterval" in js
+    assert "clearInterval" in js
+    # observer/ticker 寿命 20min（1200000ms），不是早期的 5min/30s
+    assert "1200000" in js
     # 防重复装的 sentinel
     assert "__MULTIPAGE_PAYPAL_CAPTCHA_STRIPPER__" in js
 
@@ -7884,10 +7984,385 @@ def test_ctf_card_field_ready_detects_card_number_input():
     assert payment_module._ctf_card_field_ready(FakePage()) is True
 
 
+def test_wait_and_type_dob_uses_formatted_text_when_digit_mask_misgroups():
+    state = {"value": "", "typed": []}
+
+    class FakeKeyboard:
+        def press(self, key):
+            if key == "Delete":
+                state["value"] = ""
+
+        def type(self, text, delay=0):
+            state["typed"].append(text)
+            if text == "06151990":
+                state["value"] = "0615/1/9"
+            elif text == "06/15/1990":
+                state["value"] = "06/15/1990"
+
+    class FakeLocator:
+        first = None
+
+        def __init__(self):
+            self.first = self
+
+        def click(self):
+            pass
+
+    class FakePage:
+        keyboard = FakeKeyboard()
+
+        def evaluate(self, script, arg=None):
+            if "document.getElementById" in script:
+                return state["value"]
+            return None
+
+        def locator(self, selector):
+            return FakeLocator()
+
+        def wait_for_timeout(self, timeout):
+            pass
+
+    assert payment_module._wait_and_type_dob_by_id(
+        FakePage(),
+        "dateOfBirth",
+        "06/15/1990",
+        attempts=1,
+        interval_ms=0,
+        log=lambda _m: None,
+    ) is True
+    assert state["typed"] == ["06/15/1990"]
+    assert state["value"] == "06/15/1990"
+
+
+def test_wait_and_type_dob_uses_insert_text_when_slashes_confuse_mask():
+    state = {"value": "", "typed": [], "inserted": []}
+
+    class FakeKeyboard:
+        def press(self, key):
+            if key == "Delete":
+                state["value"] = ""
+
+        def type(self, text, delay=0):
+            state["typed"].append(text)
+            if text == "11/24/1990":
+                state["value"] = "11/2/4"
+
+        def insert_text(self, text):
+            state["inserted"].append(text)
+            if text == "11/24/1990":
+                state["value"] = "11/24/1990"
+
+    class FakeLocator:
+        first = None
+
+        def __init__(self):
+            self.first = self
+
+        def click(self):
+            pass
+
+    class FakePage:
+        keyboard = FakeKeyboard()
+
+        def evaluate(self, script, arg=None):
+            if "document.getElementById" in script:
+                return state["value"]
+            return None
+
+        def locator(self, selector):
+            return FakeLocator()
+
+        def wait_for_timeout(self, timeout):
+            pass
+
+    assert payment_module._wait_and_type_dob_by_id(
+        FakePage(),
+        "dateOfBirth",
+        "11/24/1990",
+        attempts=1,
+        interval_ms=0,
+        log=lambda _m: None,
+    ) is True
+    assert state["inserted"] == ["11/24/1990"]
+    assert state["typed"] == []
+    assert state["value"] == "11/24/1990"
+
+
+def test_wait_and_type_dob_prefers_gujumpgate_style_js_setter():
+    state = {"value": "", "typed": [], "inserted": [], "js_sets": []}
+
+    class FakeKeyboard:
+        def press(self, key):
+            pass
+
+        def type(self, text, delay=0):
+            state["typed"].append(text)
+
+        def insert_text(self, text):
+            state["inserted"].append(text)
+
+    class FakeLocator:
+        first = None
+
+        def __init__(self):
+            self.first = self
+
+        def click(self):
+            pass
+
+    class FakePage:
+        keyboard = FakeKeyboard()
+
+        def evaluate(self, script, arg=None):
+            if isinstance(arg, dict) and arg.get("id") == "dateOfBirth":
+                value = str(arg.get("value") or "")
+                state["js_sets"].append(value)
+                state["value"] = value
+                return f"ok:{value}"
+            if "document.getElementById" in script:
+                return state["value"]
+            return None
+
+        def locator(self, selector):
+            return FakeLocator()
+
+        def wait_for_timeout(self, timeout):
+            pass
+
+    assert payment_module._wait_and_type_dob_by_id(
+        FakePage(),
+        "dateOfBirth",
+        "1990/11/24",
+        attempts=1,
+        interval_ms=0,
+        log=lambda _m: None,
+    ) is True
+    assert state["js_sets"] == ["11/24/1990"]
+    assert state["inserted"] == []
+    assert state["typed"] == []
+    assert state["value"] == "11/24/1990"
+
+
+def test_wait_and_type_dob_tries_compact_digits_when_mask_truncates_slashes():
+    state = {"value": "", "inserted": [], "js_sets": [], "typed": []}
+
+    class FakeKeyboard:
+        def press(self, key):
+            if key == "Delete":
+                state["value"] = ""
+
+        def insert_text(self, text):
+            state["inserted"].append(text)
+            if text == "07/27/1990":
+                state["value"] = "07/2/7"
+            elif text == "07271990":
+                state["value"] = "07/27/1990"
+
+        def type(self, text, delay=0):
+            state["typed"].append(text)
+
+    class FakeLocator:
+        first = None
+
+        def __init__(self):
+            self.first = self
+
+        def click(self):
+            pass
+
+    class FakePage:
+        keyboard = FakeKeyboard()
+
+        def evaluate(self, script, arg=None):
+            if isinstance(arg, dict) and arg.get("id") == "dateOfBirth":
+                value = str(arg.get("value") or "")
+                state["js_sets"].append(value)
+                if value == "07/27/1990":
+                    state["value"] = "07/2/7"
+                elif value == "07271990":
+                    state["value"] = "07/27/1990"
+                else:
+                    state["value"] = value
+                return f"ok:{state['value']}"
+            if "document.getElementById" in script:
+                return state["value"]
+            return None
+
+        def locator(self, selector):
+            return FakeLocator()
+
+        def wait_for_timeout(self, timeout):
+            pass
+
+    assert payment_module._wait_and_type_dob_by_id(
+        FakePage(),
+        "dateOfBirth",
+        "07/27/1990",
+        attempts=1,
+        interval_ms=0,
+        log=lambda _m: None,
+    ) is True
+    assert state["js_sets"] == ["07/27/1990", "07271990"]
+    assert state["inserted"] == []
+    assert state["typed"] == []
+    assert state["value"] == "07/27/1990"
+
+
+def test_wait_and_type_dob_refocuses_before_each_keyboard_candidate():
+    state = {
+        "active": "dateOfBirth",
+        "values": {"dateOfBirth": "", "firstName": "", "lastName": ""},
+        "inserted": [],
+    }
+
+    class FakeKeyboard:
+        def press(self, key):
+            if key == "Delete":
+                state["values"][state["active"]] = ""
+            elif key == "Tab":
+                if state["active"] == "dateOfBirth":
+                    state["active"] = "firstName"
+                elif state["active"] == "firstName":
+                    state["active"] = "lastName"
+
+        def insert_text(self, text):
+            state["inserted"].append((state["active"], text))
+            if state["active"] == "dateOfBirth" and text == "09/05/1976":
+                state["values"]["dateOfBirth"] = "09/05/19"
+            elif state["active"] == "dateOfBirth" and text == "09051976":
+                state["values"]["dateOfBirth"] = "09/05/1976"
+            else:
+                state["values"][state["active"]] = text
+
+        def type(self, text, delay=0):
+            state["values"][state["active"]] = text
+
+    class FakeLocator:
+        first = None
+
+        def __init__(self):
+            self.first = self
+
+        def click(self):
+            state["active"] = "dateOfBirth"
+
+    class FakePage:
+        keyboard = FakeKeyboard()
+
+        def evaluate(self, script, arg=None):
+            if isinstance(arg, dict) and arg.get("id") == "dateOfBirth":
+                state["values"]["dateOfBirth"] = "09/05/19"
+                return f"ok:{state['values']['dateOfBirth']}"
+            if "document.getElementById" in script:
+                key = str(arg or "")
+                return state["values"].get(key, "__noel__")
+            return None
+
+        def locator(self, selector):
+            return FakeLocator()
+
+        def wait_for_timeout(self, timeout):
+            pass
+
+    assert payment_module._wait_and_type_dob_by_id(
+        FakePage(),
+        "dateOfBirth",
+        payment_module.CTF_DATE_OF_BIRTH,
+        attempts=1,
+        interval_ms=0,
+        log=lambda _m: None,
+    ) is True
+    assert state["values"]["dateOfBirth"] == payment_module.CTF_DATE_OF_BIRTH
+    assert state["values"]["firstName"] == ""
+    assert state["values"]["lastName"] == ""
+    assert all(target == "dateOfBirth" for target, _value in state["inserted"])
+
+
+def test_wait_and_type_dob_locks_value_when_mask_keeps_two_digit_year():
+    state = {"value": "", "locked": [], "inserted": [], "typed": []}
+
+    class FakeKeyboard:
+        def press(self, key):
+            if key == "Delete":
+                state["value"] = ""
+
+        def insert_text(self, text):
+            state["inserted"].append(text)
+            state["value"] = "9/5/19"
+
+        def type(self, text, delay=0):
+            state["typed"].append(text)
+            state["value"] = "9/5/19"
+
+    class FakeLocator:
+        first = None
+
+        def __init__(self):
+            self.first = self
+
+        def click(self):
+            pass
+
+    class FakePage:
+        keyboard = FakeKeyboard()
+
+        def evaluate(self, script, arg=None):
+            if isinstance(arg, dict) and arg.get("id") == "dateOfBirth":
+                if "__ctfDobValueLock" in script:
+                    value = str(arg.get("value") or "")
+                    state["locked"].append(value)
+                    state["value"] = value
+                    return f"ok:{value}"
+                state["value"] = "09/05/19"
+                return f"ok:{state['value']}"
+            if "document.getElementById" in script:
+                return state["value"]
+            return None
+
+        def locator(self, selector):
+            return FakeLocator()
+
+        def wait_for_timeout(self, timeout):
+            pass
+
+    assert payment_module._wait_and_type_dob_by_id(
+        FakePage(),
+        "dateOfBirth",
+        payment_module.CTF_DATE_OF_BIRTH,
+        attempts=1,
+        interval_ms=0,
+        log=lambda _m: None,
+    ) is True
+    assert state["locked"] == [payment_module.CTF_DATE_OF_BIRTH]
+    assert state["value"] == payment_module.CTF_DATE_OF_BIRTH
+
+
 def test_fill_ctf_payment_form_fills_both_kanji_and_kana_names_for_jp():
     """JP 区统一 guest 表单：漢字组(#firstName/#lastName) 和片假名组
     (#countrySpecificFirstName/#countrySpecificLastName) 都要分别填对。"""
     fills = {}
+    values = {}
+    id_to_key = {
+        "firstName": "kanji_first",
+        "lastName": "kanji_last",
+        "countrySpecificFirstName": "kana_first",
+        "countrySpecificLastName": "kana_last",
+        "dateOfBirth": "dob",
+        "cardNumber": "card",
+        "email": "email",
+        "password": "password",
+        "phone": "phone",
+        "cardCvv": "cvv",
+        "cardExpiry": "exp",
+        "billingPostalCode": "zip",
+        "billingState": "state",
+        "billingCity": "city",
+        "billingLine1": "line1",
+        "billingLine2": "line2",
+    }
+
+    def key_for_id(element_id):
+        return id_to_key.get(str(element_id or ""), str(element_id or ""))
 
     class FakeLocator:
         def __init__(self, key, ready=True):
@@ -7905,23 +8380,64 @@ def test_fill_ctf_payment_form_fills_both_kanji_and_kana_names_for_jp():
             return self.ready
 
         def input_value(self, timeout=0):
-            return ""
+            return values.get(self.key, "")
 
         def fill(self, value, **kwargs):
             fills[self.key] = value
+            values[self.key] = value
 
         def select_option(self, **kwargs):
-            fills[self.key] = kwargs.get("value") or kwargs.get("label")
+            value = kwargs.get("value") or kwargs.get("label")
+            fills[self.key] = value
+            values[self.key] = value
 
         def evaluate(self, *a, **k):
-            return ""
+            return values.get(self.key, "")
+
+        def click(self):
+            pass
+
+        def type(self, value, **kwargs):
+            fills[self.key] = value
+            values[self.key] = value
+
+    class FakeKeyboard:
+        def __init__(self):
+            self.active_key = None
+
+        def press(self, key):
+            if key == "Delete" and self.active_key:
+                fills[self.active_key] = ""
+                values[self.active_key] = ""
+
+        def type(self, value, **kwargs):
+            if self.active_key:
+                fills[self.active_key] = value
+                values[self.active_key] = value
 
     class FakePage:
+        def __init__(self):
+            self.keyboard = FakeKeyboard()
+
         def wait_for_timeout(self, timeout):
             pass
 
         def keyboard_press(self, *a, **k):
             pass
+
+        def evaluate(self, script, arg=None):
+            if isinstance(arg, dict) and "id" in arg and "value" in arg:
+                key = key_for_id(arg["id"])
+                value = str(arg.get("value") or "")
+                fills[key] = value
+                values[key] = value
+                return f"ok:{value}"
+            if isinstance(arg, str):
+                key = key_for_id(arg)
+                if key in values:
+                    return values.get(key, "")
+                return "" if key in id_to_key.values() else "__noel__"
+            return None
 
         def locator(self, selector):
             s = selector
@@ -7936,6 +8452,7 @@ def test_fill_ctf_payment_form_fills_both_kanji_and_kana_names_for_jp():
             if "countryspecificlast" in sl:
                 return FakeLocator("kana_last")
             if "dateofbirth" in sl:
+                self.keyboard.active_key = "dob"
                 return FakeLocator("dob")
             if "cardnumber" in sl or "cc-number" in sl:
                 return FakeLocator("card")
@@ -8006,7 +8523,7 @@ def test_fill_ctf_payment_form_fills_both_kanji_and_kana_names_for_jp():
     assert fills.get("kanji_last") == "清水"
     assert fills.get("kana_first") == "アイリ"
     assert fills.get("kana_last") == "シミズ"
-    assert fills.get("dob") == "1993/11/08"
+    assert fills.get("dob") == payment_module.CTF_DATE_OF_BIRTH
 
 
 def test_fill_checkout_field_selects_hidden_native_select_via_js():

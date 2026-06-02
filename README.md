@@ -12,13 +12,13 @@
 </p>
 
 <p align="center">
-  <b>ChatGPT / Cursor / Kiro / Grok / Windsurf / Trae 等 13+ AI 平台账号自动注册与管理</b><br/>
+  <b>ChatGPT plus的AI 平台账号自动注册与管理</b><br/>
   <b>协议 / 浏览器双模式 · PayPal浏览器注册+内置 GoPay 协议付款 ChatGPT Plus · Mac / Windows 桌面版一键启动</b>
 </p>
 
 > ⚠️ **免责声明**：本项目仅供学习和研究使用，不得用于任何商业用途，也不得用于违反目标平台服务条款（ToS）的行为。使用本项目所产生的一切后果由使用者自行承担。
 
-> 🙏 **致谢**：本项目基于 [`lxf746/any-auto-register`](https://github.com/lxf746/any-auto-register) 二次开发，在其插件化注册框架之上扩展了 **GoPay 协议付款 ChatGPT Plus** 等能力。感谢原作者的开源工作。本仓库与上游各自独立维护。
+> 🙏 **致谢**：本项目基于 [`lxf746/any-auto-register`](https://github.com/lxf746/any-auto-register) 二次开发，在其插件化注册框架之上扩展了**PayPal 浏览器注册ChatGPT Plus** **GoPay 协议注册ChatGPT Plus** 等能力。感谢原作者的开源工作。本仓库与上游各自独立维护。
 
 多平台账号自动注册与管理系统，支持插件化扩展，内置 Web UI 与桌面客户端。
 
@@ -100,9 +100,6 @@
 
 > 📸 _截图将随版本迭代持续更新。_
 
-### QQ群交流
-点击链接加入群聊【GPT PLUS交流群aBaiAutoplus】：https://qm.qq.com/q/MfuBG14aI
-![gopay注册生成gptplus](assets/screenshots/QQ群交流.jpg)
 
 ### gopay注册生成gptplus
 
@@ -661,3 +658,12 @@ ChatGPT 注册 / 生成支付链接 / PayPal 自动结账全程都支持把浏�
 本项目采用 [AGPL-3.0](LICENSE) 许可证。个人学习和研究可自由使用；商业使用需遵守 AGPL-3.0 条款（衍生作品须开源）。
 
 本项目基于 [`lxf746/any-auto-register`](https://github.com/lxf746/any-auto-register)（同样为 AGPL-3.0）二次开发，衍生代码遵循相同许可证。
+
+
+## 使用提示
+
+- 使用者应自行遵守目标平台服务条款、适用法律及其所在地区的监管要求
+
+## 友情链接
+
+- [LINUX DO - 新的理想型社区](https://linux.do/)

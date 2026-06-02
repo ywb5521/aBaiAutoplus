@@ -67,6 +67,7 @@ CTF_CITY = "Albany"
 CTF_STATE = "NY"
 CTF_STATE_NAME = "New York"
 CTF_POSTAL_CODE = "12207"
+CTF_DATE_OF_BIRTH = "09/05/1976"
 
 _CAMOUFOX_FINGERPRINT_LIMIT = 128
 _CAMOUFOX_FINGERPRINT_LOCK = threading.Lock()
@@ -298,9 +299,137 @@ def fetch_us_billing_address(*, email: str = "", use_local_card: bool = True) ->
 # JP 路径用户实测可用：``{"path": "/jp-address", "method": "address"}``。
 # 接口的字段名跟 US 完全对齐，所以下层 normalize 共用一份。
 _BILLING_ADDRESS_REGION_PATHS = {
+    "AU": "/au-address",
+    "DE": "/de-address",
+    "FR": "/fr-address",
+    "ID": "/id-address",
     "US": "/",
     "JP": "/jp-address",
+    "KR": "/kr-address",
 }
+
+# Address seed values adapted from FoundZiGu/GuJumpgate data/address-sources.js
+# (MIT License, copyright 2026 whwh1233 / QLHazyCoder and contributors).
+_LOCAL_BILLING_ADDRESS_SEEDS = {
+    "AU": (
+        {
+            "line1": "Thyne Reid Drive",
+            "city": "Thredbo",
+            "state": "New South Wales",
+            "postal_code": "2625",
+        },
+        {
+            "line1": "George Street",
+            "city": "Sydney",
+            "state": "New South Wales",
+            "postal_code": "2000",
+        },
+    ),
+    "DE": (
+        {
+            "line1": "Unter den Linden",
+            "city": "Berlin",
+            "state": "Berlin",
+            "postal_code": "10117",
+        },
+        {
+            "line1": "Marienplatz",
+            "city": "Munich",
+            "state": "Bavaria",
+            "postal_code": "80331",
+        },
+    ),
+    "FR": (
+        {
+            "line1": "Rue de Rivoli",
+            "city": "Paris",
+            "state": "Ile-de-France",
+            "postal_code": "75001",
+        },
+        {
+            "line1": "Rue de la Republique",
+            "city": "Lyon",
+            "state": "Auvergne-Rhone-Alpes",
+            "postal_code": "69002",
+        },
+    ),
+    "ID": (
+        {
+            "line1": "Jalan M.H. Thamrin No. 1",
+            "city": "Jakarta",
+            "state": "DKI Jakarta",
+            "postal_code": "10310",
+        },
+        {
+            "line1": "Jalan Jenderal Sudirman Kav. 52-53",
+            "city": "Jakarta",
+            "state": "DKI Jakarta",
+            "postal_code": "12190",
+        },
+    ),
+    "JP": (
+        {
+            "line1": "Marunouchi 1-1",
+            "city": "Chiyoda-ku",
+            "state": "Tokyo",
+            "postal_code": "100-0005",
+        },
+        {
+            "line1": "Umeda 3-1",
+            "city": "Kita-ku",
+            "state": "Osaka",
+            "postal_code": "530-0001",
+        },
+    ),
+    "KR": (
+        {
+            "line1": "Sejong-daero 110",
+            "city": "Jung-gu",
+            "state": "Seoul",
+            "postal_code": "04524",
+        },
+        {
+            "line1": "Teheran-ro 152",
+            "city": "Gangnam-gu",
+            "state": "Seoul",
+            "postal_code": "06236",
+        },
+    ),
+    "US": (
+        {
+            "line1": "Broadway",
+            "city": "New York",
+            "state": "New York",
+            "postal_code": "10007",
+        },
+    ),
+}
+
+
+def _build_local_billing_address_fallback(
+    region_key: str,
+    *,
+    email: str = "",
+    use_local_card: bool = True,
+) -> dict:
+    normalized_region = str(region_key or "").strip().upper()
+    if normalized_region not in _LOCAL_BILLING_ADDRESS_SEEDS:
+        normalized_region = "US"
+    seed = _LOCAL_BILLING_ADDRESS_SEEDS[normalized_region][0]
+    address = {
+        "name": "James Smith",
+        "line1": seed["line1"],
+        "city": seed["city"],
+        "state": seed["state"],
+        "postal_code": seed["postal_code"],
+        "phone": "",
+        "country": normalized_region,
+        "email": str(email or "").strip(),
+        "source": "local_address_seed",
+    }
+    if use_local_card:
+        address.update(generate_visa_card())
+    return address
 
 
 def fetch_billing_address(
@@ -311,12 +440,11 @@ def fetch_billing_address(
 ) -> dict:
     """根据地区从 ``meiguodizhi.com`` 拉账单地址。
 
-    支持 ``region="US"`` / ``"JP"``（大小写不敏感）。地区不在白名单时回退
-    到 US，避免上层调用方传错值导致整个 checkout 流程崩。``use_local_card``
-    与 :func:`fetch_us_billing_address` 一致：JP 模式下默认仍然用本地
-    Luhn-valid Visa 替换远端卡，因为 PayPal hosted checkout 对远端测试卡
-    号风控偏严，本地生成的 Luhn 卡过卡号格式校验更稳定（实际扣款由
-    sandbox 模拟）。
+    支持 ``region="US"`` / ``"JP"`` 等地址种子表里的国家码（大小写不敏感）。
+    地区不在白名单时回退到 US，避免上层调用方传错值导致整个 checkout 流程崩。
+    ``use_local_card`` 与 :func:`fetch_us_billing_address` 一致：默认仍然用本地
+    Luhn-valid Visa 替换远端卡，因为 PayPal hosted checkout 对远端测试卡号
+    风控偏严，本地生成的 Luhn 卡过卡号格式校验更稳定（实际扣款由 sandbox 模拟）。
     """
     region_key = str(region or "").strip().upper()
     if region_key not in _BILLING_ADDRESS_REGION_PATHS:
@@ -325,7 +453,6 @@ def fetch_billing_address(
     # 与 generate_plus_link 同理：并发场景下 curl_cffi 首次多线程初始化 SSL
     # 库会偶发 ``curl: (35) ... invalid library`` 竞态。加轻量重试兜底，只对
     # 瞬时 TLS/连接错误重试。
-    last_exc: Exception | None = None
     resp = None
     for attempt in range(1, 4):
         try:
@@ -337,7 +464,6 @@ def fetch_billing_address(
             resp.raise_for_status()
             break
         except Exception as exc:  # noqa: BLE001 - 需按错误内容判断是否重试
-            last_exc = exc
             msg = str(exc).lower()
             transient = (
                 "tls connect error" in msg
@@ -348,12 +474,18 @@ def fetch_billing_address(
                 or "failed to perform" in msg
             )
             if attempt >= 3 or not transient:
-                raise
+                return _build_local_billing_address_fallback(
+                    region_key,
+                    email=email,
+                    use_local_card=use_local_card,
+                )
             time.sleep(0.5 * (2 ** (attempt - 1)))
     if resp is None:
-        if last_exc is not None:
-            raise last_exc
-        raise RuntimeError("账单地址接口无响应")
+        return _build_local_billing_address_fallback(
+            region_key,
+            email=email,
+            use_local_card=use_local_card,
+        )
     data = resp.json()
     address = _normalize_us_billing_address(
         data if isinstance(data, dict) else {},
@@ -363,8 +495,10 @@ def fetch_billing_address(
     required = ("name", "line1", "city", "state", "postal_code")
     missing = [key for key in required if not address.get(key)]
     if missing:
-        raise ValueError(
-            f"{region_key} 地址接口返回字段不完整: " + ", ".join(missing)
+        return _build_local_billing_address_fallback(
+            region_key,
+            email=email,
+            use_local_card=use_local_card,
         )
     if use_local_card:
         address.update(generate_visa_card())
@@ -2092,6 +2226,67 @@ def _current_page_url(page, fallback: str = "") -> str:
         return fallback
 
 
+def _is_page_load_error_url(url: str) -> bool:
+    """Chromium 页面加载失败（代理断流 / 连接重置 / DNS 失败）时会落到内部
+    错误页。动态 IP 不稳定断流后，导航通常会停在这些 URL 上。"""
+    lowered = str(url or "").strip().lower()
+    if not lowered:
+        return True
+    return (
+        lowered.startswith("chrome-error://")
+        or "chromewebdata" in lowered
+        or lowered.startswith("chrome://network-error")
+        or lowered in ("about:blank", "about:blank#blocked", "data:,")
+    )
+
+
+def _recover_page_load_if_errored(
+    page,
+    *,
+    timeout_ms: int,
+    log: Callable[[str], None],
+    attempts: int = 3,
+    cancel_check: Callable[[], bool] | None = None,
+) -> bool:
+    """检测并恢复 Chromium 加载失败页（``chrome-error://chromewebdata/`` 等）。
+
+    动态 IP 断流时导航会落到内部错误页。``page.reload()`` 会重新发起上一次
+    导航请求；最多重试 ``attempts`` 次，恢复成正常 URL 返回 ``True``，始终
+    失败返回 ``False``（由调用方决定是否最终判失败）。
+
+    页面本就正常（非错误页）时直接返回 ``True``，不做任何操作。
+    """
+    if not _is_page_load_error_url(_current_page_url(page)):
+        return True
+    reload_timeout = max(int(timeout_ms or 30000), 15000)
+    for attempt in range(1, max(int(attempts or 3), 1) + 1):
+        if callable(cancel_check) and cancel_check():
+            raise RuntimeError("任务已取消")
+        log(
+            f"检测到页面加载失败（疑似代理断流），第 {attempt}/{attempts} 次重新加载: "
+            f"{_current_page_url(page)}"
+        )
+        try:
+            page.reload(wait_until="domcontentloaded", timeout=reload_timeout)
+        except Exception as exc:
+            log(f"  · 重新加载抛错: {exc}")
+        # reload 后等 URL 稳定
+        try:
+            page.wait_for_timeout(1500)
+        except Exception:
+            time.sleep(1.5)
+        if not _is_page_load_error_url(_current_page_url(page)):
+            log(f"  · 页面已恢复: {_current_page_url(page)}")
+            return True
+        backoff_ms = int(2000 * attempt)
+        try:
+            page.wait_for_timeout(backoff_ms)
+        except Exception:
+            time.sleep(backoff_ms / 1000)
+    log(f"页面连续 {attempts} 次重新加载仍失败: {_current_page_url(page)}")
+    return False
+
+
 def _pick_active_page(page):
     """返回同一 BrowserContext 中仍活着的 page。
 
@@ -2535,6 +2730,10 @@ def _approve_paypal_agreement_if_needed(
     )
     if isinstance(click_result, str) and click_result:
         log(f"PayPal 协议确认后当前页面: {click_result}")
+        # 代理断流会让点击后的跳转落到 chrome-error 页，重新加载几次再判
+        if _is_page_load_error_url(click_result):
+            if _recover_page_load_if_errored(page, timeout_ms=timeout_ms, log=log):
+                return _current_page_url(page, paypal_url)
         return click_result
     log("已点击 PayPal 协议确认按钮，等待下一跳")
     # Python 端轮询，避开 paypal.com 的 CSP unsafe-eval 限制
@@ -2546,6 +2745,10 @@ def _approve_paypal_agreement_if_needed(
         label="PayPal 协议确认页",
     )
     final_url = _current_page_url(page, paypal_url)
+    # 代理断流：轮询期间页面落到 chrome-error，重新加载几次再判定
+    if _is_page_load_error_url(final_url):
+        if _recover_page_load_if_errored(page, timeout_ms=timeout_ms, log=log):
+            final_url = _current_page_url(page, paypal_url)
     log(f"PayPal 协议确认后当前页面: {final_url}")
     return final_url
 
@@ -2560,6 +2763,10 @@ def _advance_paypal_intermediate_pages(
     current_url = _current_page_url(page)
     max_paypal_steps = max(int(max_steps or 6), 1)
     for step in range(1, max_paypal_steps + 1):
+        # 代理断流：进入循环时页面可能已经是 chrome-error 页，先尝试恢复
+        if _is_page_load_error_url(current_url):
+            if _recover_page_load_if_errored(page, timeout_ms=timeout_ms, log=log):
+                current_url = _current_page_url(page)
         if not _is_paypal_intermediate_url(current_url):
             return current_url
         log(f"处理 PayPal 中间页第 {step}/{max_paypal_steps} 次: {current_url}")
@@ -2857,6 +3064,7 @@ def _generate_ctf_test_identity() -> dict:
         "state": CTF_STATE,
         "state_name": CTF_STATE_NAME,
         "postal_code": postal_code,
+        "date_of_birth": CTF_DATE_OF_BIRTH,
     }
 
 
@@ -2867,7 +3075,10 @@ def _apply_billing_profile_to_ctf_identity(identity: dict, billing_profile: Opti
     identity["card_exp_year"] = str(profile.get("card_exp_year") or CTF_CARD_EXP_YEAR)
     identity["card_cvv"] = str(profile.get("card_cvv") or CTF_CARD_CVV)
     # JP 区：PayPal hosted guest checkout 要求姓名同时填**汉字**和**片假名**，
-    # 还必须有合法的 ``#dateOfBirth``（``YYYY/MM/DD``）。从 ``JP_GIVEN_NAMES``
+    # 还必须有合法的 ``#dateOfBirth``。注意：PayPal hosted 这个字段是带
+    # ``M/D/YYYY`` 掩码的受控 input（``type=tel``），即使是日本区也走美式
+    # 月/日/年布局，**不是** ``YYYY/MM/DD``。早期注释写错了，按 ``YYYY/MM/DD``
+    # 写进去会被 mask 重排成 ``1/9/9207`` 这种 aria-invalid 值。从 ``JP_GIVEN_NAMES``
     # / ``JP_LAST_NAMES`` 各抽一对，保证两份姓名同源；US 池里那对英文姓
     # 名仍保留作 fallback（万一某条 JP 字段未出现，selector 扫不到也能继
     # 续按英文填，行为不退化）。
@@ -2882,12 +3093,8 @@ def _apply_billing_profile_to_ctf_identity(identity: dict, billing_profile: Opti
         identity["last_name_kana"] = last_kana
         identity["jp_full_name"] = f"{last_kanji} {first_kanji}"
         identity["jp_full_name_kana"] = f"{last_kana} {first_kana}"
-        # PayPal 出生日期校验：>= 18 周岁。固定 1985-2000 年间，月份
-        # 1-12，日期 1-28（避免 2/29、4/31 这种非法日期）。
-        year = 1985 + secrets.randbelow(15)
-        month = 1 + secrets.randbelow(12)
-        day = 1 + secrets.randbelow(28)
-        identity["date_of_birth"] = f"{year:04d}/{month:02d}/{day:02d}"
+        # CTF 页只需要一个合法成年生日，固定值能减少 PayPal mask 的随机形态。
+        identity["date_of_birth"] = CTF_DATE_OF_BIRTH
         # 把 JP 姓名也写入通用字段，让既有 ``#firstName`` / ``#lastName``
         # selector 直接命中（CTF sandbox 用 US 名时这两个字段也是同名走
         # 同一 fill 链路，只是值会被改成日文）。
@@ -3415,10 +3622,19 @@ _PAYPAL_CAPTCHA_DOM_STRIPPER_JS = (
     "                childList: true,\n"
     "                subtree: true\n"
     "            });\n"
+    "            // **额外**：MutationObserver 偶尔会漏（PayPal 用 display 切换\n"
+    "            // 而非 childList 增删，或挑战在 observer 续命间隙出现）。再挂\n"
+    "            // 一个 1s setInterval 主动扫，双保险——尤其覆盖 JP 流程里\n"
+    "            // SMS 等待期间 NGRL 异步注入的 reCAPTCHA authchallenge。\n"
+    "            const ticker = setInterval(strip, 1000);\n"
+    "            // 寿命拉到 20min：JP 的 SMS OTP 流程（120s 初始 + 多轮 resend\n"
+    "            // + 换号）经常超过原来的 5min，observer/ticker 提前死掉会让\n"
+    "            // 后出现的挑战无人清理。\n"
     "            setTimeout(function () {\n"
     "                try { observer.disconnect(); } catch (e) {}\n"
+    "                try { clearInterval(ticker); } catch (e) {}\n"
     "                try { window[SENTINEL] = false; } catch (e) {}\n"
-    "            }, 300000);\n"
+    "            }, 1200000);\n"
     "        } catch (e) {}\n"
     "    }\n"
     "    return strip();\n"
@@ -4367,6 +4583,12 @@ def _wait_for_ctf_after_continue_ready(
         if callable(cancel_check) and cancel_check():
             raise RuntimeError("任务已取消")
         current_url = _current_page_url(page)
+        # 代理断流：加载失败页先尝试重新加载恢复，再继续判定
+        if _is_page_load_error_url(current_url):
+            _recover_page_load_if_errored(
+                page, timeout_ms=timeout_ms, log=log, cancel_check=cancel_check
+            )
+            continue
         if _is_paypal_intermediate_url(current_url):
             _advance_paypal_intermediate_pages(page, timeout_ms=timeout_ms, log=log)
             continue
@@ -4894,6 +5116,298 @@ def _select_ctf_phone_country(page, phone_e164: str, *, log: Callable[[str], Non
     return False
 
 
+def _wait_and_type_dob_by_id(
+    page, element_id: str, value: str, *,
+    log=None, attempts: int = 12, interval_ms: int = 500,
+) -> bool:
+    """专治 PayPal hosted ``#dateOfBirth`` 的 mask 输入框。
+
+    这个字段是 ``type=tel`` + 输入掩码（react-imask 之类）的受控组件，模板
+    是 ``MM/DD/YYYY``。当前 PayPal mask 对逐键输入不稳定：纯数字可能变成
+    ``0615/1/9``，逐键输入带斜杠又可能变成 ``11/2/4``。
+
+    GuJumpgate 的做法是先走 React-compatible native setter + ``input/change``
+    事件；这里也优先按这个方式直写并验证，失败时再用 ``keyboard.insert_text``
+    一次性插入，最后才退回逐键 ``type``。
+    """
+    eid = str(element_id or "").strip()
+    if not eid:
+        return False
+    val = str(value or "")
+    if not val:
+        return True
+    dob_value = _normalize_paypal_dob_value(val)
+    if not dob_value:
+        digits = re.sub(r"\D", "", val)
+        if callable(log):
+            log(f"  · #{eid} DOB 数字位数不为 8: {digits!r}（原值 {val!r}），回退到 JS 设值")
+        return _wait_and_force_fill_by_id(page, eid, val, log=log, attempts=attempts, interval_ms=interval_ms)
+    check_script = """
+    (id) => {
+      const el = document.getElementById(id);
+      if (!el) return '__noel__';
+      return String(el.value == null ? '' : el.value);
+    }
+    """
+
+    def _focus_and_clear_dob() -> None:
+        try:
+            loc = page.locator(f"#{eid}").first
+            loc.click()
+        except Exception:
+            try:
+                page.evaluate("(id) => document.getElementById(id) && document.getElementById(id).focus()", eid)
+            except Exception:
+                pass
+        try:
+            page.keyboard.press("Control+A")
+            page.keyboard.press("Delete")
+        except Exception:
+            pass
+
+    candidates = _paypal_dob_input_candidates(dob_value)
+    for i in range(max(int(attempts), 1)):
+        try:
+            cur = page.evaluate(check_script, eid)
+        except Exception:
+            cur = "__noel__"
+        if cur == "__noel__":
+            try:
+                page.wait_for_timeout(int(interval_ms))
+            except Exception:
+                time.sleep(interval_ms / 1000)
+            continue
+        if _paypal_dob_value_matches(cur, dob_value):
+            return True
+
+        for candidate in candidates:
+            after = _force_fill_dob_input_by_id(page, eid, candidate, log=log)
+            if _paypal_dob_value_matches(after, dob_value):
+                if callable(log):
+                    log(f"  · #{eid} 已 JS 设值 DOB ✓ ({after})")
+                return True
+            if after not in (None, "", "__noel__") and callable(log):
+                log(f"  · #{eid} DOB JS 设值后值为 {after!r}，继续尝试")
+
+        # 元素已在：聚焦 → 全选清空 → 一次性插入。insert_text 比逐键 type
+        # 更不容易被 masked input 把斜杠当成用户按键后重排。
+        for candidate in candidates:
+            _focus_and_clear_dob()
+            try:
+                page.keyboard.insert_text(candidate)
+            except Exception:
+                continue
+            try:
+                page.keyboard.press("Tab")
+            except Exception:
+                pass
+            try:
+                after = page.evaluate(check_script, eid)
+            except Exception:
+                after = ""
+            if _paypal_dob_value_matches(after, dob_value):
+                if callable(log):
+                    log(f"  · #{eid} 已插入 DOB ✓ ({after})")
+                return True
+        for candidate in candidates:
+            _focus_and_clear_dob()
+            try:
+                # 最后的兼容 fallback：逐键输入候选格式。
+                page.keyboard.type(candidate, delay=40)
+            except Exception:
+                try:
+                    loc = page.locator(f"#{eid}").first
+                    loc.type(candidate, delay=40)
+                except Exception:
+                    pass
+            try:
+                page.keyboard.press("Tab")
+            except Exception:
+                pass
+            try:
+                after = page.evaluate(check_script, eid)
+            except Exception:
+                after = ""
+            if _paypal_dob_value_matches(after, dob_value):
+                if callable(log):
+                    log(f"  · #{eid} 已键入 DOB ✓ ({after})")
+                return True
+        after = _lock_dob_input_value_by_id(page, eid, dob_value, log=log)
+        if _paypal_dob_value_matches(after, dob_value):
+            if callable(log):
+                log(f"  · #{eid} 已锁定 DOB ✓ ({after})")
+            return True
+        if callable(log):
+            log(f"  · #{eid} 键入 DOB 后值为 {after!r}，重试")
+        try:
+            page.wait_for_timeout(int(interval_ms))
+        except Exception:
+            time.sleep(interval_ms / 1000)
+    if callable(log):
+        log(f"  · #{eid} 多次重试仍未填上 DOB")
+    return False
+
+
+def _is_complete_paypal_dob_value(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"\d{2}/\d{2}/\d{4}", value or "") is not None
+
+
+def _paypal_dob_input_candidates(dob_value: str) -> list[str]:
+    normalized = _normalize_paypal_dob_value(dob_value)
+    if not normalized:
+        return [str(dob_value or "")]
+    month, day, year = normalized.split("/")
+    return list(
+        dict.fromkeys(
+            [
+                normalized,
+                f"{month}{day}{year}",
+                f"{int(month)}/{int(day)}/{year}",
+            ]
+        )
+    )
+
+
+def _paypal_dob_value_matches(actual: object, expected: str) -> bool:
+    normalized_actual = _normalize_paypal_dob_value(str(actual or ""))
+    normalized_expected = _normalize_paypal_dob_value(expected)
+    return bool(normalized_actual and normalized_expected and normalized_actual == normalized_expected)
+
+
+def _force_fill_dob_input_by_id(page, element_id: str, value: str, *, log=None) -> str:
+    """GuJumpgate-style DOB fill: native input value setter + input/change events."""
+    eid = str(element_id or "").strip()
+    dob_value = str(value or "").strip()
+    if not eid or not dob_value:
+        return ""
+    script = """
+    (args) => {
+      const { id, value } = args;
+      const el = document.getElementById(id);
+      if (!el) return 'no_element';
+      if (el.disabled || el.getAttribute('aria-disabled') === 'true') return 'disabled';
+      const proto = window.HTMLInputElement && window.HTMLInputElement.prototype;
+      const setter = proto && Object.getOwnPropertyDescriptor(proto, 'value')
+        && Object.getOwnPropertyDescriptor(proto, 'value').set;
+      try { el.focus(); } catch (e) {}
+      if (setter) setter.call(el, value); else el.value = value;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return 'ok:' + String(el.value || '');
+    }
+    """
+    try:
+        result = page.evaluate(script, {"id": eid, "value": dob_value})
+    except Exception as exc:
+        if callable(log):
+            log(f"  · #{eid} DOB JS 设值异常: {exc}")
+        return ""
+    if isinstance(result, str) and result.startswith("ok:"):
+        return result[3:]
+    return str(result or "")
+
+
+def _lock_dob_input_value_by_id(page, element_id: str, value: str, *, log=None) -> str:
+    """Last-resort DOB fill: keep PayPal's mask from rewriting YYYY into YY."""
+    eid = str(element_id or "").strip()
+    dob_value = str(value or "").strip()
+    if not eid or not dob_value:
+        return ""
+    script = """
+    (args) => {
+      const { id, value } = args;
+      const el = document.getElementById(id);
+      if (!el) return 'no_element';
+      const proto = window.HTMLInputElement && window.HTMLInputElement.prototype;
+      const desc = proto && Object.getOwnPropertyDescriptor(proto, 'value');
+      const nativeGet = desc && desc.get;
+      const nativeSet = desc && desc.set;
+      if (!nativeSet) return 'no_setter';
+      const expectedDigits = String(value || '').replace(/\\D/g, '');
+      const getValue = () => String(nativeGet ? nativeGet.call(el) : el.value || '');
+      const setNative = (next) => {
+        nativeSet.call(el, String(next || ''));
+        try { el.setAttribute('value', String(next || '')); } catch (e) {}
+      };
+      if (!el.__ctfDobValueLock) {
+        Object.defineProperty(el, 'value', {
+          configurable: true,
+          get() {
+            return getValue();
+          },
+          set(next) {
+            const text = String(next == null ? '' : next);
+            const digits = text.replace(/\\D/g, '');
+            if (expectedDigits && digits && digits.length < expectedDigits.length) {
+              setNative(value);
+              return;
+            }
+            setNative(text);
+          },
+        });
+        el.__ctfDobValueLock = true;
+      }
+      try { el.focus(); } catch (e) {}
+      try { if (el._valueTracker) el._valueTracker.setValue(''); } catch (e) {}
+      setNative(value);
+      try { el.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) {}
+      setNative(value);
+      try { el.dispatchEvent(new Event('change', { bubbles: true })); } catch (e) {}
+      setNative(value);
+      for (const delay of [0, 50, 150, 400, 900]) {
+        setTimeout(() => {
+          try { setNative(value); } catch (e) {}
+        }, delay);
+      }
+      return 'ok:' + getValue();
+    }
+    """
+    try:
+        result = page.evaluate(script, {"id": eid, "value": dob_value})
+    except Exception as exc:
+        if callable(log):
+            log(f"  · #{eid} DOB value lock 异常: {exc}")
+        return ""
+    if isinstance(result, str) and result.startswith("ok:"):
+        return result[3:]
+    return str(result or "")
+
+
+def _normalize_paypal_dob_value(value: str) -> str:
+    """把常见 DOB 输入规范成 PayPal hosted 接受的 ``MM/DD/YYYY``。"""
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    parts = re.findall(r"\d+", raw)
+    year = month = day = ""
+    if len(parts) >= 3:
+        first, second, third = parts[:3]
+        if len(first) == 4:
+            year, month, day = first, second, third
+        else:
+            month, day, year = first, second, third
+    else:
+        digits = re.sub(r"\D", "", raw)
+        if len(digits) != 8:
+            return ""
+        possible_year = int(digits[:4])
+        possible_month = int(digits[4:6])
+        possible_day = int(digits[6:8])
+        if 1900 <= possible_year <= 2099 and 1 <= possible_month <= 12 and 1 <= possible_day <= 31:
+            year, month, day = digits[:4], digits[4:6], digits[6:8]
+        else:
+            month, day, year = digits[:2], digits[2:4], digits[4:8]
+    try:
+        year_int = int(year)
+        month_int = int(month)
+        day_int = int(day)
+    except Exception:
+        return ""
+    if not (1900 <= year_int <= 2099 and 1 <= month_int <= 12 and 1 <= day_int <= 31):
+        return ""
+    return f"{month_int:02d}/{day_int:02d}/{year_int:04d}"
+
+
 def _wait_and_force_fill_by_id(
     page, element_id: str, value: str, *,
     log=None, attempts: int = 12, interval_ms: int = 500,
@@ -5041,10 +5555,11 @@ def _fill_paypal_unified_guest_form(page, identity: dict, *, log: Callable[[str]
             time.sleep(0.4)
         _wait_and_force_fill_by_id(page, "password", password, log=log_fn)
 
-    # 5) 生年月日（懒加载段，需等渲染）
-    dob = str(identity.get("date_of_birth") or "")
+    # 5) 生年月日（懒加载段，需等渲染）。这个字段带 mask 模板，用 JS setter
+    # 强写会被 mask 截断（``10/09/1985`` → ``10/09/19``），改成模拟键盘输入。
+    dob = CTF_DATE_OF_BIRTH
     if dob:
-        _wait_and_force_fill_by_id(page, "dateOfBirth", dob, log=log_fn)
+        _wait_and_type_dob_by_id(page, "dateOfBirth", dob, log=log_fn)
 
     # 6) 姓名（懒加载段）：漢字 #firstName/#lastName + 片假名
     #    #countrySpecificFirstName/#countrySpecificLastName
@@ -5084,7 +5599,7 @@ def _fill_paypal_unified_guest_form(page, identity: dict, *, log: Callable[[str]
         ("billingLine1", line1),
         ("billingLine2", line2),
         ("password", password),
-        ("dateOfBirth", str(identity.get("date_of_birth") or "")),
+        ("dateOfBirth", CTF_DATE_OF_BIRTH),
     ] + name_pairs
     check_value_script = """
     (id) => {
@@ -5108,6 +5623,12 @@ def _fill_paypal_unified_guest_form(page, identity: dict, *, log: Callable[[str]
             def _norm(s):
                 return re.sub(r"[\s/]", "", str(s or ""))
             if _norm(cur) == _norm(fval) or cur == fval:
+                continue
+            # ``dateOfBirth`` 是 mask 输入框，不能用 JS setter 强写（会被
+            # mask 截断成前 6 位），必须用键盘 type。
+            if fid == "dateOfBirth":
+                if _wait_and_type_dob_by_id(page, fid, fval, log=log_fn, attempts=2, interval_ms=200):
+                    refilled += 1
                 continue
             if _force_fill_input_by_id(page, fid, fval, log=log_fn):
                 refilled += 1
@@ -5493,10 +6014,11 @@ def _fill_ctf_payment_form(page, identity: dict, *, log: Callable[[str], None] |
             ),
             labels=(),
         )
-        # 出生日期（``#dateOfBirth``，``YYYY/MM/DD`` 文本格式）
+        # 出生日期（``#dateOfBirth``，``MM/DD/YYYY`` 文本格式；hosted form
+        # 的输入掩码即便 JP 区也走美式 M/D/YYYY 布局）
         _fill_checkout_field(
             page,
-            str(identity.get("date_of_birth") or ""),
+            CTF_DATE_OF_BIRTH,
             selectors=(
                 '#dateOfBirth',
                 'input[name="dateOfBirth"]',
@@ -5589,7 +6111,7 @@ def _fill_ctf_payment_form(page, identity: dict, *, log: Callable[[str], None] |
                 "PayPal hosted JP 专属字段填写完毕："
                 f"姓={identity.get('last_name_kanji', '?')}({identity.get('last_name_kana', '?')}) "
                 f"名={identity.get('first_name_kanji', '?')}({identity.get('first_name_kana', '?')}) "
-                f"DOB={identity.get('date_of_birth', '?')}"
+                f"DOB={CTF_DATE_OF_BIRTH}"
             )
 
 
@@ -6176,6 +6698,12 @@ def _wait_for_chatgpt_return(
         if current_url and current_url != last_logged_url:
             log(f"等待跳回 chatgpt / pay.openai，当前页面: {current_url}")
             last_logged_url = current_url
+        # 代理断流：页面落到 chrome-error 加载失败页，重新加载几次再继续
+        if _is_page_load_error_url(current_url):
+            _recover_page_load_if_errored(
+                page, timeout_ms=int(timeout_ms), log=log, cancel_check=cancel_check
+            )
+            continue
         # PayPal /webapps/hermes 再次确认页：点 "Agree and Continue" 才能继续
         if _paypal_review_page_visible(page):
             try:
@@ -6439,8 +6967,12 @@ def _complete_ctf_sandbox_flow(
                 )
                 break
 
-            # 不是拒号、就是 SMS 没到：点 popup 上 Resend 让 PayPal 重发
+            # 不是拒号、就是 SMS 没到：点 popup 上 Resend 让 PayPal 重发。
+            # Resend 前先 strip 一次——JP 流程等 SMS 期间 PayPal NGRL 异常
+            # 检测常在这个空窗注入 reCAPTCHA authchallenge 浮层（#captchaComponent
+            # / .ngrl-anomalydetection-div），盖住 popup 上的 Resend 按钮。
             if code_attempt < max_resends:
+                _install_paypal_captcha_dom_stripper(page, log=log)
                 if _click_ctf_resend_in_popup(page, log=log):
                     log(
                         f"已点击 Resend，继续等 sms_pool[{pool_index}] "
@@ -6851,6 +7383,23 @@ def _open_unique_camoufox_page(
     raise RuntimeError(f"Camoufox 连续生成重复指纹: {last_hash[:12]}")
 
 
+def _is_transient_page_navigation_error(exc: BaseException) -> bool:
+    """判断 Playwright page.goto 抛错是否属于可重试的瞬时网络断连。"""
+    msg = str(exc or "").lower()
+    return any(
+        token in msg
+        for token in (
+            "err_socks_connection_failed",
+            "err_timed_out",
+            "err_connection_reset",
+            "err_connection_closed",
+            "err_proxy_connection_failed",
+            "err_tunnel_connection_failed",
+            "err_empty_response",
+        )
+    )
+
+
 def complete_paypal_checkout(
     *,
     checkout_url: str,
@@ -7005,7 +7554,25 @@ def complete_paypal_checkout(
                         page.context.add_cookies(_parse_cookie_str(cookies_str, "chatgpt.com"))
                         log("ChatGPT cookies 已注入 Camoufox")
                 log("打开 ChatGPT 测试支付链接")
-                page.goto(checkout_url, wait_until="domcontentloaded", timeout=browser_timeout)
+                last_nav_exc: Exception | None = None
+                for nav_attempt in range(1, 4):
+                    try:
+                        page.goto(checkout_url, wait_until="domcontentloaded", timeout=browser_timeout)
+                        last_nav_exc = None
+                        break
+                    except Exception as exc:  # noqa: BLE001 - 按错误内容判定是否重试
+                        last_nav_exc = exc
+                        if nav_attempt >= 3 or not _is_transient_page_navigation_error(exc):
+                            raise
+                        backoff = 1.5 * nav_attempt
+                        log(
+                            f"打开 ChatGPT 测试支付链接瞬时网络失败（第 {nav_attempt}/3 次，"
+                            f"{backoff}s 后重试）: {exc}"
+                        )
+                        time.sleep(backoff)
+                        _raise_if_cancelled()
+                if last_nav_exc is not None:
+                    raise last_nav_exc
                 _raise_if_cancelled()
                 _wait_checkout_page_ready(page, timeout_ms=browser_timeout, log=log)
                 _raise_if_cancelled()
